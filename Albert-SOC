@@ -1,0 +1,120 @@
+rm(list=ls())
+
+setwd("D:/Chapter 5/Plan/APSIM_SOC/TEST 2")
+
+library(ggplot2)
+library(dplyr)
+
+# Generic function to read apsim output files. 
+read.apsim <- function(apsim.name) {
+  header<-readLines(apsim.name, n=25)
+  if (length(header) == 0 ) {return(NULL)}
+  
+  i<-which(grepl("Date",header,fixed = T))
+  apsim <- read.table(apsim.name,skip=i+1,na.strings=c("NA","?"))
+  names(apsim) <- unlist(strsplit(trimws(header[i]), " +"))
+  
+  i<-which(grepl("factors",header,fixed = T))
+  if (length(i) > 0) {
+    x<-unlist(strsplit(substring(header[i], first = 11), ";"))
+    factors<-as.data.frame(lapply(strsplit(x, "="), function(x) {x[2]}))
+    names(factors)<-unlist(lapply(strsplit(x, "="), function(x) {x[1]}))
+    return(cbind(factors, apsim))
+  }
+  return(apsim)
+}
+
+#df<- do.call(rbind, lapply(c("Investment Intensified summer Rotation.out", "Investment Intensified winter Rotation.out"), read.apsim))
+#write.csv(
+#  df %>% filter( ! currentState %in% c("fallow1", "fallow2","fallow3")) %>%
+#  mutate(Date=as.Date(Date, format="%d/%m/%Y")) %>% arrange(Date), file = "int.csv")
+
+scenarios <-c("Investment Baseline", "Investment Diversified", "Investment Simplified")
+files<-paste0(rep(scenarios,each=4), "_", 1:4, " Rotation.out" )
+
+df<- do.call(rbind, lapply(files, read.apsim)) %>%
+  mutate(Date=as.Date(Date, format="%d/%m/%Y"))
+df$efficiency <- as.numeric(df$efficiency)
+
+files<-paste0(rep("Investment Intensified_" , 8), 
+              1:4, 
+              c(" summer", " winter", " summer", " winter",
+                " winter", " summer", " winter", " summer"), 
+              " Rotation.out")
+df2<- do.call(rbind, lapply( files, read.apsim)) %>% 
+  filter( ! currentState %in% c("fallow1", "fallow2","fallow3")) %>%
+  mutate(Date=as.Date(Date, format="%d/%m/%Y"),
+         efficiency = as.numeric(efficiency)) %>% 
+  arrange(efficiency, scenario, Date) 
+
+
+df<- rbind(df, df2)
+
+
+# Consistent names,  dry:wet conversion, and mm Water -> Ml
+df <- df %>% mutate(currentState = tolower(gsub("[0-9]", "", currentState))) %>%
+  mutate(YieldWetTha = Yield * 1.14 / 1000, 
+         YieldTonnes = YieldWetTha * PlantingArea,
+         WaterApplied = applied_irrigation / 100 * PlantingArea) 
+
+# Correction factor for cotton
+ccf <- 1000 / mean(df$applied_irrigation[df$currentState=="cotton" & df$applied_irrigation > 0])
+df$applied_irrigation[df$currentState=="cotton"] <- df$applied_irrigation[df$currentState=="cotton"] * ccf
+
+#df$YieldWetTha[df$currentState=="cotton"] <- df$yield_bales[df$currentState=="cotton"]
+
+# Observed from sundry WCP scenarios
+obs1<-data.frame(
+  currentState=c("canola", "corn", "cotton", "fababean", "rice", "wheat"),
+  applied_irrigation=c(250, 900, 1000, 400, 1050, 450),
+  YieldWetTha=c(3, 15, 10, 3.5, 12.5, 6.5))
+
+obs<-data.frame(
+  currentState=c("canola", "corn", "cotton", "fababean", "rice", "wheat"),
+  applied_irrigation=c(250, 900, 1000, 400, 1050, 450),
+  YieldWetTha=c(2.500, 15, 10, 3.5, 12.5, 5))
+
+z<- df %>% filter(!grepl("fallow", currentState))  %>%
+      group_by(efficiency, scenario, currentState) %>% 
+      summarise(WA = mean(applied_irrigation/100), Y=mean(YieldWetTha))
+View(z)
+stop()
+
+pdf("Historical Apsim Simulations.pdf", width=6, height=5)
+# Crop yields
+g<- df %>% filter(efficiency == 1.0 & !grepl("fallow", currentState))  %>%
+  ggplot(aes(x=currentState, y=YieldWetTha)) + 
+  labs(y="Yield (t,b/ha)") +
+  geom_boxplot() + geom_point(data=obs, colour="red") + 
+  facet_wrap(~scenario) + 
+  theme_minimal()
+print(g)
+
+# Water used per crop
+g<-df %>% filter(efficiency == 1.0 & !grepl("fallow", currentState))  %>%
+  ggplot(aes(x=currentState, y=applied_irrigation/100)) +
+  geom_boxplot() + geom_point(data=obs, colour="red") + 
+  labs(x="Crop", y = "Irrigation (Ml/ha)", title="Water applied") + 
+  theme_minimal()
+print(g)
+
+g<- df %>% filter(!grepl("fallow", currentState))  %>%
+  mutate(year = as.numeric(format.Date(as.Date(Date, format="%d/%m/%Y"),  "%Y"))) %>%
+  group_by(efficiency, scenario, year) %>% 
+  summarise(tot = sum(applied_irrigation * PlantingArea / 100)) %>%
+  ggplot() + 
+  geom_histogram(aes(x=tot, group=as.factor(efficiency), fill=efficiency), binwidth=500, position="dodge") + 
+  #geom_density(aes(y = ..count.., x=tot)) +
+  facet_wrap(~scenario) + theme_minimal() + 
+  labs(title="Annual farm water usage", x="Ml"); print(g)
+print(g)
+
+g<-df %>% filter(efficiency == 1.0 & grepl("fallow", currentState))  %>% ggplot() + 
+  geom_histogram(aes(x=nWeedings), binwidth = 1) + 
+  labs(title="Number of weedings / fallow period") +
+  facet_wrap(~scenario); print(g)
+print(g)
+
+
+
+write.csv(df, "CLAY-HIGH 6% (Pallamallawa No055)ANNUAL.csv", row.names = F)
